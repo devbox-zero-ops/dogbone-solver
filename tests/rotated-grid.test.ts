@@ -4,20 +4,25 @@ import { DogboneFanoutSolver, type DogboneFanoutSolverInput } from "lib"
 function makeRotatedBga(
   rotationDeg: number,
   gridSize = 6,
-  pitch = 1,
+  pitchX = 1,
+  pitchY = pitchX,
+  roundStepMm?: number,
 ): DogboneFanoutSolverInput {
   const rad = (rotationDeg * Math.PI) / 180
   const cos = Math.cos(rad)
   const sin = Math.sin(rad)
-  const half = ((gridSize - 1) * pitch) / 2
+  const halfX = ((gridSize - 1) * pitchX) / 2
+  const halfY = ((gridSize - 1) * pitchY) / 2
+  const roundCoord = (value: number) =>
+    roundStepMm ? Math.round(value / roundStepMm) * roundStepMm : value
   const pads: { x: number; y: number }[] = []
   for (let row = 0; row < gridSize; row++) {
     for (let col = 0; col < gridSize; col++) {
-      const lx = col * pitch - half
-      const ly = row * pitch - half
+      const lx = col * pitchX - halfX
+      const ly = row * pitchY - halfY
       pads.push({
-        x: lx * cos - ly * sin,
-        y: lx * sin + ly * cos,
+        x: roundCoord(lx * cos - ly * sin),
+        y: roundCoord(lx * sin + ly * cos),
       })
     }
   }
@@ -78,9 +83,27 @@ test("135-degree rotated BGA escapes all 8 pads cleanly", () => {
 })
 
 test("non-45-degree rotation fails with a clear rotation error", () => {
-  const solver = new DogboneFanoutSolver(makeRotatedBga(30))
+  for (const angle of [0.3, 30, 44.7, 45.3]) {
+    const solver = new DogboneFanoutSolver(makeRotatedBga(angle))
+    solver.solve()
+    expect(solver.failed).toBe(true)
+    expect(solver.error).toMatch(/rotation/i)
+    expect(solver.error).toMatch(/45/)
+  }
+})
+
+test("45-degree rotated BGA rounded to 0.001 mm escapes all 8 pads cleanly", () => {
+  const solver = new DogboneFanoutSolver(makeRotatedBga(45, 6, 1, 1, 0.001))
   solver.solve()
-  expect(solver.failed).toBe(true)
-  expect(solver.error).toMatch(/rotation/i)
-  expect(solver.error).toMatch(/45/)
+  expect(solver.failed).toBe(false)
+  expect(solver.error).toBeNull()
+  expect(solver.getOutput()).toHaveLength(8)
+})
+
+test("45-degree rotated rectangular-pitch BGA escapes all 8 pads cleanly", () => {
+  const solver = new DogboneFanoutSolver(makeRotatedBga(45, 6, 1, 1.27))
+  solver.solve()
+  expect(solver.failed).toBe(false)
+  expect(solver.error).toBeNull()
+  expect(solver.getOutput()).toHaveLength(8)
 })

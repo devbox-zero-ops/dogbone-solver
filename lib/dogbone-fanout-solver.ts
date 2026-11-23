@@ -10,6 +10,55 @@ import type { Obstacle, SimpleRouteJson, SimplifiedPcbTrace } from "./types"
 import { getViaBoardLayers } from "./get-via-board-layers"
 
 const ROTATION_TOLERANCE_RAD = (0.5 * Math.PI) / 180
+const MAX_SNAP_DISPLACEMENT_MM = 0.002
+const MAX_COORDINATE_CLUSTER_MM = 0.005
+
+function findMinPadDistance(pads: Obstacle[]): number {
+  let minDist = Number.POSITIVE_INFINITY
+  for (let i = 0; i < pads.length; i++) {
+    for (let j = i + 1; j < pads.length; j++) {
+      const d = Math.hypot(
+        pads[j]!.center.x - pads[i]!.center.x,
+        pads[j]!.center.y - pads[i]!.center.y,
+      )
+      if (d > 1e-6 && d < minDist) minDist = d
+    }
+  }
+  return minDist
+}
+
+function clusterCoordinates(values: number[], tolerance: number): number[] {
+  const sorted = [
+    ...new Set(values.map((v) => Math.round(v * 1e6) / 1e6)),
+  ].sort((a, b) => a - b)
+  if (sorted.length <= 1 || tolerance <= 0) return sorted
+  const result: number[] = []
+  let clusterStart = sorted[0]!
+  let clusterSum = clusterStart
+  let clusterCount = 1
+  for (let i = 1; i < sorted.length; i++) {
+    const v = sorted[i]!
+    if (v - clusterStart <= tolerance) {
+      clusterSum += v
+      clusterCount++
+    } else {
+      result.push(
+        clusterCount === 1
+          ? clusterStart
+          : Math.round((clusterSum / clusterCount) * 1e6) / 1e6,
+      )
+      clusterStart = v
+      clusterSum = v
+      clusterCount = 1
+    }
+  }
+  result.push(
+    clusterCount === 1
+      ? clusterStart
+      : Math.round((clusterSum / clusterCount) * 1e6) / 1e6,
+  )
+  return result
+}
 
 function rotatePoint(
   point: { x: number; y: number },
@@ -60,19 +109,12 @@ function rotateBounds(
   }
 }
 
-function inferGridRotationRadians(pads: Obstacle[]): number {
-  if (pads.length < 2) return 0
-  let minDist = Number.POSITIVE_INFINITY
-  for (let i = 0; i < pads.length; i++) {
-    for (let j = i + 1; j < pads.length; j++) {
-      const d = Math.hypot(
-        pads[j]!.center.x - pads[i]!.center.x,
-        pads[j]!.center.y - pads[i]!.center.y,
-      )
-      if (d > 1e-6 && d < minDist) minDist = d
-    }
-  }
-  if (!Number.isFinite(minDist)) return 0
+function inferGridRotationRadians(
+  pads: Obstacle[],
+  minDist: number,
+  origin: { x: number; y: number },
+): number {
+  if (pads.length < 2 || !Number.isFinite(minDist)) return 0
 
   // Collect nearest-neighbor edge angles folded into [0, pi/2) using circular mean on 4*theta.
   let sumCos = 0
@@ -93,11 +135,21 @@ function inferGridRotationRadians(pads: Obstacle[]): number {
   if (count === 0) return 0
 
   const mean4 = Math.atan2(sumSin, sumCos)
-  let theta = (((mean4 / 4) % (Math.PI / 2)) + Math.PI / 2) % (Math.PI / 2)
+  const theta = (((mean4 / 4) % (Math.PI / 2)) + Math.PI / 2) % (Math.PI / 2)
   const distToAxis = Math.min(theta, Math.PI / 2 - theta)
-  if (distToAxis <= ROTATION_TOLERANCE_RAD) return 0
-  if (Math.abs(theta - Math.PI / 4) <= ROTATION_TOLERANCE_RAD) {
-    return Math.PI / 4
+  const distToDiag = Math.abs(theta - Math.PI / 4)
+  const residualRad = Math.min(distToAxis, distToDiag)
+  let maxRadius = 0
+  for (const pad of pads) {
+    const r = Math.hypot(pad.center.x - origin.x, pad.center.y - origin.y)
+    if (r > maxRadius) maxRadius = r
+  }
+  const residualDisplacement = maxRadius * Math.sin(residualRad)
+  if (
+    residualRad <= ROTATION_TOLERANCE_RAD &&
+    residualDisplacement <= MAX_SNAP_DISPLACEMENT_MM
+  ) {
+    return distToAxis <= distToDiag ? 0 : Math.PI / 4
   }
   const deg = (theta * 180) / Math.PI
   throw new Error(
@@ -279,7 +331,6 @@ export class DogboneFanoutSolver extends BaseSolver {
         const rawPads = input.obstacles.filter(
           (obstacle) => obstacle.componentId === sourceObstacle.componentId,
         )
-        const rotationRad = inferGridRotationRadians(rawPads)
         const origin = {
           x:
             (Math.min(...rawPads.map((p) => p.center.x)) +
@@ -290,6 +341,12 @@ export class DogboneFanoutSolver extends BaseSolver {
               Math.max(...rawPads.map((p) => p.center.y))) /
             2,
         }
+        const minPadDist = findMinPadDistance(rawPads)
+        const rotationRad = inferGridRotationRadians(
+          rawPads,
+          minPadDist,
+          origin,
+        )
         const rotatedObstacleMap = new Map<Obstacle, Obstacle>()
         const rotatedObstacles =
           rotationRad === 0
@@ -303,12 +360,17 @@ export class DogboneFanoutSolver extends BaseSolver {
           rotationRad === 0
             ? rawPads
             : rawPads.map((pad) => rotatedObstacleMap.get(pad)!)
-        const xs = [
-          ...new Set(pads.map((pad) => Math.round(pad.center.x * 1e6) / 1e6)),
-        ].sort((a, b) => a - b)
-        const ys = [
-          ...new Set(pads.map((pad) => Math.round(pad.center.y * 1e6) / 1e6)),
-        ].sort((a, b) => a - b)
+        const clusterTolerance = Number.isFinite(minPadDist)
+          ? Math.min(MAX_COORDINATE_CLUSTER_MM, minPadDist * 0.05)
+          : MAX_COORDINATE_CLUSTER_MM
+        const xs = clusterCoordinates(
+          pads.map((pad) => pad.center.x),
+          clusterTolerance,
+        )
+        const ys = clusterCoordinates(
+          pads.map((pad) => pad.center.y),
+          clusterTolerance,
+        )
         if (xs.length < 2 || ys.length < 2)
           throw new Error("Dogbone fanout requires a two-dimensional pad grid")
         const pitch = (coordinates: number[]) =>
