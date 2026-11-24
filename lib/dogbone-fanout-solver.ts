@@ -11,7 +11,8 @@ import { getViaBoardLayers } from "./get-via-board-layers"
 
 const ROTATION_TOLERANCE_RAD = (0.5 * Math.PI) / 180
 const MAX_SNAP_DISPLACEMENT_MM = 0.002
-const MAX_COORDINATE_CLUSTER_MM = 0.005
+const COORDINATE_CLUSTER_PITCH_RATIO = 0.05
+const FALLBACK_COORDINATE_CLUSTER_MM = 0.005
 
 function findMinPadDistance(pads: Obstacle[]): number {
   let minDist = Number.POSITIVE_INFINITY
@@ -361,8 +362,8 @@ export class DogboneFanoutSolver extends BaseSolver {
             ? rawPads
             : rawPads.map((pad) => rotatedObstacleMap.get(pad)!)
         const clusterTolerance = Number.isFinite(minPadDist)
-          ? Math.min(MAX_COORDINATE_CLUSTER_MM, minPadDist * 0.05)
-          : MAX_COORDINATE_CLUSTER_MM
+          ? minPadDist * COORDINATE_CLUSTER_PITCH_RATIO
+          : FALLBACK_COORDINATE_CLUSTER_MM
         const xs = clusterCoordinates(
           pads.map((pad) => pad.center.x),
           clusterTolerance,

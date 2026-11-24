@@ -100,6 +100,21 @@ test("45-degree rotated BGA rounded to 0.001 mm escapes all 8 pads cleanly", () 
   expect(solver.getOutput()).toHaveLength(8)
 })
 
+test("45-degree rotated 6x6 1mm and 16x16 0.8mm BGAs rounded to 0.01 mm escape all 8 pads cleanly", () => {
+  for (const [gridSize, pitch] of [
+    [6, 1],
+    [16, 0.8],
+  ] as const) {
+    const input = makeRotatedBga(45, gridSize, pitch, pitch, 0.01)
+    input.input.bounds = { minX: -12, maxX: 12, minY: -12, maxY: 12 }
+    const solver = new DogboneFanoutSolver(input)
+    solver.solve()
+    expect(solver.failed).toBe(false)
+    expect(solver.error).toBeNull()
+    expect(solver.getOutput()).toHaveLength(8)
+  }
+})
+
 test("45-degree rotated rectangular-pitch BGA escapes all 8 pads cleanly", () => {
   const solver = new DogboneFanoutSolver(makeRotatedBga(45, 6, 1, 1.27))
   solver.solve()
